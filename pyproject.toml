@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tropical-jones-pippenger"
+version = "0.1.0"
+description = "Pippenger optimization for tropical Jones matrix multiple exponentiation"
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0"]
+
+[tool.setuptools.packages.find]
+include = ["jones_crypto*"]
