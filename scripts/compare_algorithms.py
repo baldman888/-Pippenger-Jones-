@@ -1,4 +1,4 @@
-"""在完全相同的实例上比较线性、二进制快速幂与 Pippenger 算法。"""
+"""在同一输入上比较线性、二进制快速幂与 Pippenger 的完整 H^A 求值。"""
 
 from __future__ import annotations
 
@@ -9,227 +9,178 @@ from pathlib import Path
 from statistics import median
 from time import perf_counter
 
-# 把项目根目录加入模块搜索路径，便于直接右击运行本脚本。
+# 允许直接运行本文件，不必先安装项目包。
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from jones_crypto.circulant import random_circulant  
-from jones_crypto.jones import (  
-    generate_jones_matrix,
-    generate_public_deformations,
-)
-from jones_crypto.metrics import OperationCounter  
-from jones_crypto.multi_exponentiation import (  
-    choose_window_size,
+from jones_crypto.circulant import random_circulant
+from jones_crypto.jones import generate_jones_matrix, generate_public_deformations
+from jones_crypto.metrics import OperationCounter
+from jones_crypto.multi_exponentiation import (
     multi_exponentiation_binary,
     multi_exponentiation_naive,
     multi_exponentiation_pippenger,
 )
 
-PAPER_ROWS = [
-    # k、n、s，以及论文表 2 报告的一次 H^A 计算时间（秒）。
-    (10, 80, 2, 1.082),
-    (14, 51, 3, 1.929),
-    (21, 40, 4, 2.380),
-    (25, 39, 5, 5.618),
-    (28, 33, 6, 5.686),
+
+# 每行依次为 (k, n, s, w)。
+# 论文表 3：五组参数，每组使用各自的窗口宽度。
+# EXPERIMENT_ROWS = [
+#     (10, 80, 2, 1),
+#     (14, 51, 3, 2),
+#     (21, 40, 4, 2),
+#     (25, 39, 5, 3),
+#     (28, 33, 6, 3),
+# ]
+
+#论文表 5：同一份 (10, 80, 128) 输入，依次比较五个窗口宽度。
+EXPERIMENT_ROWS = [
+    (10, 80, 128, 7),
+    (10, 80, 128, 4),
+    (10, 80, 128, 3),
+    (10, 80, 128, 2),
+    (10, 80, 128, 1),
 ]
 
-EXTRA_ROWS = [
-    # 额外扩大指数范围，用于观察大指数下的 Pippenger 表现。
-    (10, 80, 16, None),
-    (10, 80, 256, None),
-    (14, 128, 1024, None),
-]
+
+def same_output(reference, candidate):
+    """逐项比较完整 H^A 的输出。"""
+
+    return len(reference) == len(candidate) and all(
+        left.equals(right) for left, right in zip(reference, candidate, strict=True)
+    )
 
 
-def timed_action(action, bases, private, *, warmups, repeats, **kwargs):
-    """预热后重复测量多重指数运算，返回中位时间和乘法次数。"""
+def run_group(k, n, s, windows, *, warmups, repeats):
+    """一份输入测全部指定窗口；线性和二进制基线各只测一次。"""
 
-    # 预热不计入结果，用于减小首次运行产生的偶然波动。
-    for _ in range(warmups):
-        action(bases, private, **kwargs)
+    if len(set(windows)) != len(windows) or any(w < 1 for w in windows):
+        raise ValueError("同组窗口宽度必须是互不重复的正整数")
 
-    times = []
-    outputs = None
-    operation_counts = []
-    for _ in range(repeats):
-        counter = OperationCounter()
-        start = perf_counter()
-        outputs = action(bases, private, counter=counter, **kwargs)
-        times.append(perf_counter() - start)
-        operation_counts.append(counter.tropical_matrix_multiplications)
-
-    # 对同一输入，同一种算法每次执行的乘法次数应完全相同。
-    if len(set(operation_counts)) != 1:
-        raise AssertionError("同一算法多次运行的矩阵乘法次数不一致")
-    return outputs, median(times), operation_counts[0]
-
-
-def run_row(k, n, s, paper_seconds, requested_window, warmups, repeats):
-    """在相同公开矩阵和私钥指数矩阵上运行三种算法。"""
-
-    # 固定 seed，使三种算法得到完全相同的输入。
+    # 固定这些种子保证两种表格模式的输入生成方式相同。
     jones = generate_jones_matrix(k, max_entry=1000, seed=10_000 + k)
     bases = generate_public_deformations(jones, n)
     private = random_circulant(n, s, seed=20_000 + n + s)
     scalar_bits = max(1, int(private.max()).bit_length())
-    # 未指定 --window 时，根据底数数量和指数位数自动选择窗口。
-    window = requested_window or choose_window_size(n, scalar_bits)
 
-    # 三次计时只替换 H^A 求值器，其余参数和计数方式保持一致。
-    naive, naive_time, naive_ops = timed_action(
-        multi_exponentiation_naive,
-        bases,
-        private,
-        warmups=warmups,
-        repeats=repeats,
-    )
-    binary, binary_time, binary_ops = timed_action(
-        multi_exponentiation_binary,
-        bases,
-        private,
-        warmups=warmups,
-        repeats=repeats,
-    )
-    pippenger, pippenger_time, pippenger_ops = timed_action(
-        multi_exponentiation_pippenger,
-        bases,
-        private,
-        warmups=warmups,
-        repeats=repeats,
-        window_size=window,
-    )
-    # 性能比较前先逐个检查输出，避免拿错误结果讨论加速效果。
-    for name, output in (("二进制快速幂", binary), ("Pippenger", pippenger)):
-        if not all(
-            left.equals(right)
-            for left, right in zip(naive, output, strict=True)
-        ):
-            raise AssertionError(f"{name} 输出与线性算法不一致")
-
-    return {
-        "k": k,
-        "n": n,
-        "s": s,
-        "window": window,
-        "paper_seconds": "" if paper_seconds is None else paper_seconds,
-        "naive_seconds": naive_time,
-        "binary_seconds": binary_time,
-        "pippenger_seconds": pippenger_time,
-        "pippenger_vs_naive_speedup": naive_time / pippenger_time,
-        "pippenger_vs_binary_speedup": binary_time / pippenger_time,
-        "naive_matmul": naive_ops,
-        "binary_matmul": binary_ops,
-        "pippenger_matmul": pippenger_ops,
-        "pippenger_vs_naive_reduction_percent": (
-            100.0 * (naive_ops - pippenger_ops) / naive_ops
-            if naive_ops
-            else 0.0
-        ),
-        "pippenger_vs_binary_reduction_percent": (
-            100.0 * (binary_ops - pippenger_ops) / binary_ops
-            if binary_ops
-            else 0.0
-        ),
+    strategies = {
+        "naive": (multi_exponentiation_naive, {}),
+        "binary": (multi_exponentiation_binary, {}),
     }
+    for window in windows:
+        strategies[f"pippenger_{window}"] = (
+            multi_exponentiation_pippenger,
+            {"window_size": window},
+        )
+
+    # 先验证结果，避免把错误的快速结果写入论文。
+    reference = multi_exponentiation_naive(bases, private)
+    for name, (action, kwargs) in strategies.items():
+        if name == "naive":
+            continue
+        if not same_output(reference, action(bases, private, **kwargs)):
+            raise AssertionError(f"{name} 的输出与线性重复乘法不一致")
+
+    names = list(strategies)
+    for round_index in range(warmups):
+        for offset in range(len(names)):
+            name = names[(round_index + offset) % len(names)]
+            action, kwargs = strategies[name]
+            action(bases, private, **kwargs)
+
+    times = {name: [] for name in names}
+    operation_counts = {name: [] for name in names}
+    # 每轮改变算法执行顺序，减轻温度、缓存等时间漂移带来的偏差。
+    for round_index in range(repeats):
+        for offset in range(len(names)):
+            name = names[(round_index + offset) % len(names)]
+            action, kwargs = strategies[name]
+            counter = OperationCounter()
+            start = perf_counter()
+            action(bases, private, counter=counter, **kwargs)
+            times[name].append(perf_counter() - start)
+            operation_counts[name].append(counter.tropical_matrix_multiplications)
+
+    for name, counts in operation_counts.items():
+        if len(set(counts)) != 1:
+            raise AssertionError(f"{name} 的矩阵乘法次数在重复测量间不一致")
+
+    naive_ms = 1000 * median(times["naive"])
+    binary_ms = 1000 * median(times["binary"])
+    naive_ops = operation_counts["naive"][0]
+    binary_ops = operation_counts["binary"][0]
+    results = []
+    for window in windows:
+        name = f"pippenger_{window}"
+        pippenger_ms = 1000 * median(times[name])
+        results.append(
+            {
+                "k": k,
+                "n": n,
+                "s": s,
+                "window": window,
+                "window_count": (scalar_bits + window - 1) // window,
+                "naive_ms": naive_ms,
+                "binary_ms": binary_ms,
+                "pippenger_ms": pippenger_ms,
+                "saved_vs_naive_ms": naive_ms - pippenger_ms,
+                "saved_vs_binary_ms": binary_ms - pippenger_ms,
+                "naive_matmul": naive_ops,
+                "binary_matmul": binary_ops,
+                "pippenger_matmul": operation_counts[name][0],
+            }
+        )
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="比较线性、二进制快速幂与 Pippenger 计算同一次 H^A 的性能。"
+        description="按文件顶部启用的参数组生成论文表 3 或表 5 的实验数据。"
     )
-    parser.add_argument("--quick", action="store_true", help="仅运行第一组参数")
-    parser.add_argument("--extra", action="store_true", help="追加大指数实验参数")
-    parser.add_argument("--window", type=int, help="手动指定 Pippenger 窗口宽度")
-    parser.add_argument(
-        "--warmup",
-        type=int,
-        default=2,
-        help="每种算法的预热次数，默认为 2",
-    )
-    parser.add_argument(
-        "--repeat",
-        type=int,
-        default=7,
-        help="每种算法的正式测量次数，默认为 7，并取中位数",
-    )
-    parser.add_argument("--csv", type=Path, help="可选：指定 CSV 结果保存路径")
+    parser.add_argument("--quick", action="store_true", help="仅运行启用参数组的第一行")
+    parser.add_argument("--warmup", type=int, default=2, help="预热轮数，默认 2")
+    parser.add_argument("--repeat", type=int, default=31, help="测量轮数，默认 31，取中位数")
+    parser.add_argument("--csv", type=Path, help="可选：保存汇总结果的 CSV 路径")
     args = parser.parse_args()
-    if args.window is not None and args.window < 1:
-        parser.error("--window 必须是正整数")
     if args.warmup < 0:
         parser.error("--warmup 不能为负数")
     if args.repeat < 1:
         parser.error("--repeat 必须是正整数")
 
-    rows = list(PAPER_ROWS)
-    if args.quick:
-        rows = rows[:1]
-    if args.extra:
-        rows.extend(EXTRA_ROWS)
+    rows = EXPERIMENT_ROWS[:1] if args.quick else EXPERIMENT_ROWS
+    if not rows:
+        parser.error("请在文件顶部启用一组实验参数")
+    groups = {}
+    for k, n, s, window in rows:
+        groups.setdefault((k, n, s), []).append(window)
 
-    results = [
-        run_row(*row, args.window, args.warmup, args.repeat)
-        for row in rows
-    ]
+    results = []
+    for (k, n, s), windows in groups.items():
+        results.extend(
+            run_group(k, n, s, windows, warmups=args.warmup, repeats=args.repeat)
+        )
 
-    print(f"计时方式：预热 {args.warmup} 次，正式测量 {args.repeat} 次并取中位数")
-    print("三种算法使用完全相同的 H 与私钥 A，且输出已经逐项验证一致。")
-    print("\n运行时间（单位：秒）")
-    print(
-        " k   n    s  w  线性重复乘法时间  二进制快速幂时间  Pippenger分桶法时间"
-        "  P/线性加速比  P/二进制加速比"
-    )
-    print("-" * 116)
+    print(f"计时方式：每种策略预热 {args.warmup} 次、测量 {args.repeat} 次，取中位数。")
+    print("同一参数组共用输入；不同窗口共用线性与二进制基线。")
+    print("\n运行时间（单位：ms）")
+    print("(k,n,s)\tw\t线性重复乘法\t二进制快速幂\tPippenger\t相对线性节省\t相对二进制节省")
     for result in results:
         print(
-            f"{result['k']:2d} {result['n']:3d} {result['s']:4d}"
-            f" {result['window']:2d}"
-            f" {result['naive_seconds']:11.6f}"
-            f" {result['binary_seconds']:13.6f}"
-            f" {result['pippenger_seconds']:15.6f}"
-            f" {result['pippenger_vs_naive_speedup']:13.3f}x"
-            f" {result['pippenger_vs_binary_speedup']:15.3f}x"
+            f"({result['k']},{result['n']},{result['s']})\t{result['window']}\t"
+            f"{result['naive_ms']:.3f}\t{result['binary_ms']:.3f}\t"
+            f"{result['pippenger_ms']:.3f}\t{result['saved_vs_naive_ms']:.3f}\t"
+            f"{result['saved_vs_binary_ms']:.3f}"
         )
 
     print("\n热带矩阵乘法次数")
-    print(
-        " k   n    s  w  线性重复乘法次数  二进制快速幂次数  Pippenger分桶法次数"
-        "  相对线性减少  相对二进制减少"
-    )
-    print("-" * 104)
+    print("(k,n,s)\tw\t窗口数t\t线性重复乘法\t二进制快速幂\tPippenger")
     for result in results:
         print(
-            f"{result['k']:2d} {result['n']:3d} {result['s']:4d}"
-            f" {result['window']:2d}"
-            f" {result['naive_matmul']:11d}"
-            f" {result['binary_matmul']:11d}"
-            f" {result['pippenger_matmul']:14d}"
-            f" {result['pippenger_vs_naive_reduction_percent']:12.2f}%"
-            f" {result['pippenger_vs_binary_reduction_percent']:14.2f}%"
+            f"({result['k']},{result['n']},{result['s']})\t{result['window']}\t"
+            f"{result['window_count']}\t{result['naive_matmul']}\t"
+            f"{result['binary_matmul']}\t{result['pippenger_matmul']}"
         )
 
-    # 各列含义（三种算法使用完全相同的 H 与私钥 A）：
-    # k：每个热带 Jones 矩阵的阶数，即单个 H_i 是 k×k 矩阵。
-    # n：公开矩阵向量 H 的长度；私钥 A 同时是 n×n 循环矩阵。
-    # s：私钥指数的取值上界，代码实际从 0 到 s-1 中取值。
-    # w：Pippenger 的窗口宽度（位数）；每个窗口有 2^w 个桶。
-    # 线性重复乘法时间：逐次乘法计算一次 H^A 的中位耗时。
-    # 二进制快速幂时间：平方—乘算法计算同一次 H^A 的中位耗时。
-    # Pippenger分桶法时间：Pippenger 算法计算同一次 H^A 的中位耗时。
-    # P/线性加速比：线性时间 / Pippenger时间。
-    # P/二进制加速比：二进制快速幂时间 / Pippenger时间。
-    # 两种加速比大于 1 时，均表示 Pippenger 更快。
-    # 线性重复乘法次数：逐次乘法算法执行的热带矩阵乘法次数。
-    # 二进制快速幂乘法次数：平方—乘算法执行的热带矩阵乘法次数。
-    # Pippenger分桶法次数：Pippenger 执行的热带矩阵乘法次数。
-    # 两个减少率分别以线性算法和二进制快速幂为参照。
-    # 注意：这里测量的是一次 H^A，不是完整的密钥生成、加密或解密耗时。
-    print("\n说明：以上时间均对应一次 H^A，不是完整的加密或解密时间。")
-    print("      加速比 > 1 表示 Pippenger 更快；减少率 > 0 表示乘法次数减少。")
-
-    # 指定 --csv 时，把原始数值另存为 CSV，便于后续绘图和统计。
     if args.csv:
         with args.csv.open("w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=list(results[0]))
